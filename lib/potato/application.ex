@@ -4,8 +4,11 @@ defmodule Potato.Application do
   use Application
 
   def start(_type, _args) do
+    interval = Application.get_env(:potato, :interval)
+    fun = fn -> Stream.interval(interval) |> Stream.each(&IO.puts/1) |> Stream.run() end
+
     children = [
-      {Task, fn -> Stream.interval(1000) |> Stream.each(&IO.puts/1) |> Stream.run() end}
+      Supervisor.child_spec({Task, fun}, restart: :permanent),
     ]
 
     opts = [strategy: :one_for_one, name: Potato.Supervisor]

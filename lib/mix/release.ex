@@ -48,7 +48,7 @@ defmodule Mix.Release do
       name: name,
       version: version,
       root: root,
-      version_path: Path.join([root, "release", version]),
+      version_path: Path.join([root, "releases", version]),
       erts_path: erts_path,
       erts_version: erts_version,
       applications: rel_apps,
@@ -210,6 +210,7 @@ defmodule Mix.Tasks.Release do
     #     remote.script
     #     start.boot
     #     start.script
+    #     sys.config
     build_rel(release, config)
 
     # lib/
@@ -241,22 +242,22 @@ defmodule Mix.Tasks.Release do
   defp build_rel(release, config) do
     File.rm_rf!(release.version_path)
     File.mkdir_p!(release.version_path)
-
-    build_vm_args(release)
     variables = build_variables()
 
-    build_release_rel(release, variables)
-    build_remote_rel(release, variables)
-
-    if copy_consolidated(config, release) do
-      rewrite_rel_script_with_consolidated(release)
+    with :ok <- build_sys_config(release, config),
+         :ok <- build_vm_args(release),
+         :ok <- build_release_rel(release, variables),
+         :ok <- build_remote_rel(release, variables) do
+      if copy_consolidated(config, release) do
+        rewrite_rel_script_with_consolidated(release)
+      else
+        rename_rel_script(release)
+      end
     else
-      rename_rel_script(release)
+      {:error, message} ->
+        File.rm_rf!(release.version_path)
+        Mix.raise(message)
     end
-  end
-
-  defp build_vm_args(release) do
-    File.write!(Path.join(release.version_path, "vm.args"), vm_args_text())
   end
 
   defp build_variables do
@@ -269,6 +270,31 @@ defmodule Mix.Tasks.Release do
         do: {'RELEASE_LIB', path |> :filename.dirname() |> :filename.dirname()}
   end
 
+  defp build_vm_args(release) do
+    File.write!(Path.join(release.version_path, "vm.args"), vm_args_text())
+    :ok
+  end
+
+  defp build_sys_config(release, config) do
+    contents =
+      if File.regular?(config[:config_path]) do
+        config[:config_path] |> Mix.Config.eval!() |> elem(0)
+      else
+        []
+      end
+
+    sys_config = Path.join(release.version_path, "sys.config")
+    File.write!(sys_config, consultable("config", contents))
+
+    case :file.consult(sys_config) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Could not write configuration file. Reason: #{inspect(reason)}"}
+    end
+  end
+
   defp build_release_rel(release, variables) do
     rel_path = Path.join(release.version_path, "#{release.name}.rel")
     build_rel_boot_and_script(rel_path, release, release.applications, variables)
@@ -277,25 +303,25 @@ defmodule Mix.Tasks.Release do
   defp build_remote_rel(release, variables) do
     remote_apps = for app <- release.applications, elem(app, 0) in @remote_apps, do: app
     rel_path = Path.join(release.version_path, "remote.rel")
-    build_rel_boot_and_script(rel_path, release, remote_apps, variables)
+    result = build_rel_boot_and_script(rel_path, release, remote_apps, variables)
     File.rm(rel_path)
+    result
   end
 
   defp build_rel_boot_and_script(rel_path, release, apps, variables) do
     %{name: name, version: version, erts_version: erts_version} = release
     rel_spec = {:release, {to_charlist(name), to_charlist(version)}, {:erts, erts_version}, apps}
-    File.write!(rel_path, :io_lib.format("%% coding: utf-8~n~p.~n", [rel_spec]))
+    File.write!(rel_path, consultable("rel", rel_spec))
 
     sys_path = rel_path |> Path.rootname() |> to_charlist()
     sys_options = [:silent, :no_dot_erlang, :no_warn_sasl, variables: variables]
 
     case :systools.make_script(sys_path, sys_options) do
-      {:error, module, info} ->
-        File.rm_rf(Path.dirname(sys_path))
-        Mix.raise(module.format_error(info) |> to_string() |> String.trim())
-
       {:ok, _module, _warnings} ->
         :ok
+
+      {:error, module, info} ->
+        {:error, module.format_error(info) |> to_string() |> String.trim()}
     end
   end
 
@@ -327,14 +353,8 @@ defmodule Mix.Tasks.Release do
           other
       end)
 
-    {date, time} = :erlang.localtime()
     script = {:script, rel_info, new_instructions}
-
-    File.write!(
-      Path.join(release.version_path, "start.script"),
-      :io_lib.format("%% coding: utf-8~n%% script generated at ~p ~p~n~p.~n", [date, time, script])
-    )
-
+    File.write!(Path.join(release.version_path, "start.script"), consultable("script", script))
     :ok = :systools.script2boot(to_charlist(Path.join(release.version_path, "start")))
   after
     File.rm(Path.join(release.version_path, "#{release.name}.script"))
@@ -348,6 +368,14 @@ defmodule Mix.Tasks.Release do
         Path.join(release.version_path, "start.#{ext}")
       )
     end
+
+    :ok
+  end
+
+  defp consultable(kind, term) do
+    {date, time} = :erlang.localtime()
+    args = [kind, date, time, term]
+    :io_lib.format("%% coding: utf-8~n%% ~ts generated at ~p ~p~n~p.~n", args)
   end
 
   defp build_lib(release) do
@@ -545,6 +573,7 @@ defmodule Mix.Tasks.Release do
   rpc () {
     exec "$RELEASE_DIR/elixir" \\
          --hidden --name "rpc-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
+         --erl-config "${RELEASE_DIR}/sys" \\
          --boot "${RELEASE_DIR}/remote" \\
          --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
          --rpc-eval "$REL_NAME@127.0.0.1" "$1"
@@ -553,6 +582,7 @@ defmodule Mix.Tasks.Release do
   start () {
     exec "$RELEASE_DIR/$1" --no-halt \\
          --werl --name "$REL_NAME@127.0.0.1" --cookie "$COOKIE" \\
+         --erl-config "${RELEASE_DIR}/sys" \\
          --boot "${RELEASE_DIR}/start" \\
          --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
          --vm-args "${RELEASE_DIR}/vm.args" "${@:2}"
@@ -571,6 +601,7 @@ defmodule Mix.Tasks.Release do
     remote)
       exec "$RELEASE_DIR/iex" \\
            --werl --hidden --name "remote-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
+           --erl-config "${RELEASE_DIR}/sys" \\
            --boot "${RELEASE_DIR}/remote" \\
            --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
            --remsh "$REL_NAME@127.0.0.1"
