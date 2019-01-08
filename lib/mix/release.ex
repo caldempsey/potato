@@ -169,7 +169,6 @@ defmodule Mix.Tasks.Release do
   # TODO: Docs, docs, docs, docs, docs, docs, docs
   # TODO: Overlays
   # TODO: Relups and appups
-  # TODO: sys.config
   # TODO: Runtime configuration (with Config and ConfigReader)
   # TODO: Support :steps
 
