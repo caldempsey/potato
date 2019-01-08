@@ -2,7 +2,8 @@ defmodule Mix.Release do
   defstruct [
     :name,
     :version,
-    :path,
+    :root,
+    :version_path,
     :erts_path,
     :erts_version,
     :applications,
@@ -13,62 +14,23 @@ defmodule Mix.Release do
   @type application :: {atom(), charlist(), mode} | {atom(), charlist(), mode, [atom()]}
   @type t :: %{
           name: atom(),
-          version: charlist(),
-          path: String.t(),
+          version: String.t(),
+          root: String.t(),
+          version_path: String.t(),
           erts_path: charlist() | nil,
           erts_version: charlist(),
           applications: [application],
           options: keyword()
         }
-end
-
-defmodule Mix.Tasks.Release do
-  @moduledoc """
-
-  ## Command line options
-
-    * `--no-archives-check` - does not check archive
-    * `--no-deps-check` - does not check dependencies
-    * `--no-elixir-version-check` - does not check Elixir version
-    * `--no-compile` - does not compile before assembling the release
-
-  """
-
-  # TODO: Docs, docs, docs, docs, docs, docs, docs
-  # TODO: Overlays
-  # TODO: Protocol consolidation
-  # TODO: Relups and appups
-  # TODO: sys.config
-  # TODO: Runtime configuration (with Config and ConfigReader)
-  # TODO: Support :steps
-
-  use Mix.Task
-  import Mix.Generator
 
   @default_apps %{iex: :permanent, elixir: :permanent, sasl: :permanent}
-  @remote_apps [:kernel, :stdlib, :iex, :elixir, :logger, :compiler]
   @valid_modes [:permanent, :temporary, :transient, :load, :none]
 
-  @impl true
-  def run(args) do
-    # TODO: Parse args
-    Mix.Project.get!()
-    config = Mix.Project.config()
-    Mix.Task.run("loadpaths", args)
-
-    unless "--no-compile" in args do
-      Mix.Project.compile(args, config)
-    end
-
-    config
-    |> build_release()
-    |> assemble()
-  end
-
-  ## build_release
-
-  defp build_release(config) do
+  @doc false
+  def new!(config) do
     {name, apps, opts} = find_release(config)
+    apps = Map.merge(@default_apps, apps)
+
     {include_erts, opts} = Keyword.pop(opts, :include_erts, true)
     {erts_path, erts_version} = erts_data(include_erts)
 
@@ -79,10 +41,14 @@ defmodule Mix.Tasks.Release do
       |> Map.values()
       |> Enum.sort()
 
+    root = Path.join([Mix.Project.build_path(config), "rel", Atom.to_string(name)])
+    version = opts[:version] || Keyword.fetch!(config, :version)
+
     %Mix.Release{
       name: name,
-      version: config |> Keyword.fetch!(:version) |> to_charlist(),
-      path: Path.join([Mix.Project.build_path(config), "rel", Atom.to_string(name)]),
+      version: version,
+      root: root,
+      version_path: Path.join([root, "release", version]),
       erts_path: erts_path,
       erts_version: erts_version,
       applications: rel_apps,
@@ -111,15 +77,27 @@ defmodule Mix.Tasks.Release do
   defp find_release(config) do
     {name, opts} = lookup_release(config) || infer_release(config)
     {apps, opts} = Keyword.pop(opts, :applications, [])
+    apps = Map.new(apps)
 
-    default_apps =
-      if Mix.Project.umbrella?(config) do
-        @default_apps
-      else
-        Map.put(@default_apps, Keyword.fetch!(config, :app), :permanent)
+    if Mix.Project.umbrella?(config) do
+      unless opts[:version] do
+        Mix.raise(
+          "No version found for release #{inspect(name)}. " <>
+            "Releases inside umbrella must have :version set"
+        )
       end
 
-    {name, Map.merge(default_apps, Map.new(apps)), opts}
+      unless apps != %{} do
+        Mix.raise(
+          "No applications found for release #{inspect(name)}. " <>
+            "Releases inside umbrella must have :applications set to a non-empty list"
+        )
+      end
+
+      {name, apps, opts}
+    else
+      {name, Map.put_new(apps, Keyword.fetch!(config, :app), :permanent), opts}
+    end
   end
 
   defp lookup_release(_config) do
@@ -172,72 +150,113 @@ defmodule Mix.Tasks.Release do
       included_apps -> {app, vsn, mode, included_apps}
     end
   end
+end
 
-  ## assemble
+defmodule Mix.Tasks.Release do
+  @moduledoc """
 
-  defp assemble(release) do
-    release_version_path = Path.join([release.path, "releases", release.version])
+  ## Command line options
 
-    if not File.exists?(release_version_path) or
+    * `--no-archives-check` - does not check archive
+    * `--no-deps-check` - does not check dependencies
+    * `--no-elixir-version-check` - does not check Elixir version
+    * `--no-compile` - does not compile before assembling the release
+
+  """
+
+  # TODO: Copy or evaluate rel/vm.args{.eex} if one is available
+  # TODO: Support --force
+  # TODO: Docs, docs, docs, docs, docs, docs, docs
+  # TODO: Overlays
+  # TODO: Relups and appups
+  # TODO: sys.config
+  # TODO: Runtime configuration (with Config and ConfigReader)
+  # TODO: Support :steps
+
+  use Mix.Task
+  import Mix.Generator
+
+  @remote_apps [:kernel, :stdlib, :iex, :elixir, :logger, :compiler]
+  @copy_app_dirs ["ebin", "include", "priv"]
+
+  @impl true
+  def run(args) do
+    # TODO: Parse args
+    Mix.Project.get!()
+    config = Mix.Project.config()
+    Mix.Task.run("loadpaths", args)
+
+    unless "--no-compile" in args do
+      Mix.Project.compile(args, config)
+    end
+
+    release = Mix.Release.new!(config)
+
+    if not File.exists?(release.version_path) or
          Mix.shell().yes?("Release #{release.name}-#{release.version} already exists. Override?") do
-      # releases/
-      #   VERSION/
-      #     NAME.rel
-      #     remote.boot
-      #     remote.script
-      #     start.boot
-      #     start.script
-      build_rel(release, release_version_path)
-
-      # lib/
-      #   APP_NAME-APP_VSN/
-      #     ebin/
-      #     priv/
-      build_lib(release)
-
-      # bin/
-      #   REL_NAME
-      #   REL_NAME.data
-      # releases/
-      #   VERSION/
-      #     elixir
-      #     elixir.bat
-      #     iex
-      #     iex.bat
-      copy_executables(release, release_version_path)
-
-      # erts-ERTS_VSN/
-      copy_erts(release)
-
-      # releases/
-      #   COOKIE
-      #   start_erl.data
-      write_data(release)
-
+      assemble(release, config)
       announce(release)
     end
   end
 
-  defp build_rel(release, release_version_path) do
-    File.rm_rf!(release_version_path)
-    File.mkdir_p!(release_version_path)
-    File.write!(Path.join(release_version_path, "vm.args"), vm_args_text())
+  ## assemble
 
+  defp assemble(release, config) do
+    # releases/
+    #   VERSION/
+    #     consolidated/
+    #     NAME.rel
+    #     remote.boot
+    #     remote.script
+    #     start.boot
+    #     start.script
+    build_rel(release, config)
+
+    # lib/
+    #   APP_NAME-APP_VSN/
+    #     ebin/
+    #     priv/
+    build_lib(release)
+
+    # bin/
+    #   REL_NAME
+    #   REL_NAME.data
+    # releases/
+    #   VERSION/
+    #     elixir
+    #     elixir.bat
+    #     iex
+    #     iex.bat
+    copy_executables(release)
+
+    # erts-ERTS_VSN/
+    copy_erts(release)
+
+    # releases/
+    #   COOKIE
+    #   start_erl.data
+    write_data(release)
+  end
+
+  defp build_rel(release, config) do
+    File.rm_rf!(release.version_path)
+    File.mkdir_p!(release.version_path)
+
+    build_vm_args(release)
     variables = build_variables()
-    rel_path = Path.join(release_version_path, "#{release.name}.rel")
-    build_rel_boot_and_script(rel_path, release, release.applications, variables)
 
-    for ext <- [:boot, :script] do
-      File.rename(
-        Path.join(release_version_path, "#{release.name}.#{ext}"),
-        Path.join(release_version_path, "start.#{ext}")
-      )
+    build_release_rel(release, variables)
+    build_remote_rel(release, variables)
+
+    if copy_consolidated(config, release) do
+      rewrite_rel_script_with_consolidated(release)
+    else
+      rename_rel_script(release)
     end
+  end
 
-    remote_apps = for app <- release.applications, elem(app, 0) in @remote_apps, do: app
-    rel_path = Path.join(release_version_path, "remote.rel")
-    build_rel_boot_and_script(rel_path, release, remote_apps, variables)
-    File.rm(rel_path)
+  defp build_vm_args(release) do
+    File.write!(Path.join(release.version_path, "vm.args"), vm_args_text())
   end
 
   defp build_variables do
@@ -250,9 +269,21 @@ defmodule Mix.Tasks.Release do
         do: {'RELEASE_LIB', path |> :filename.dirname() |> :filename.dirname()}
   end
 
+  defp build_release_rel(release, variables) do
+    rel_path = Path.join(release.version_path, "#{release.name}.rel")
+    build_rel_boot_and_script(rel_path, release, release.applications, variables)
+  end
+
+  defp build_remote_rel(release, variables) do
+    remote_apps = for app <- release.applications, elem(app, 0) in @remote_apps, do: app
+    rel_path = Path.join(release.version_path, "remote.rel")
+    build_rel_boot_and_script(rel_path, release, remote_apps, variables)
+    File.rm(rel_path)
+  end
+
   defp build_rel_boot_and_script(rel_path, release, apps, variables) do
     %{name: name, version: version, erts_version: erts_version} = release
-    rel_spec = {:release, {to_charlist(name), version}, {:erts, erts_version}, apps}
+    rel_spec = {:release, {to_charlist(name), to_charlist(version)}, {:erts, erts_version}, apps}
     File.write!(rel_path, :io_lib.format("%% coding: utf-8~n~p.~n", [rel_spec]))
 
     sys_path = rel_path |> Path.rootname() |> to_charlist()
@@ -265,6 +296,57 @@ defmodule Mix.Tasks.Release do
 
       {:ok, _module, _warnings} ->
         :ok
+    end
+  end
+
+  defp copy_consolidated(config, release) do
+    if config[:consolidate_protocols] do
+      source = Mix.Project.consolidation_path(config)
+      target = Path.join(release.version_path, "consolidated")
+      File.cp_r!(source, target)
+      target
+    end
+  end
+
+  defp rewrite_rel_script_with_consolidated(release) do
+    consolidated = '$RELEASE_LIB/../releases/#{release.version}/consolidated'
+
+    {:ok, [{:script, rel_info, instructions}]} =
+      :file.consult(Path.join(release.version_path, "#{release.name}.script"))
+
+    new_instructions =
+      Enum.map(instructions, fn
+        {:path, paths} ->
+          if Enum.any?(paths, &List.starts_with?(&1, '$RELEASE_LIB')) do
+            {:path, [consolidated | paths]}
+          else
+            {:path, paths}
+          end
+
+        other ->
+          other
+      end)
+
+    {date, time} = :erlang.localtime()
+    script = {:script, rel_info, new_instructions}
+
+    File.write!(
+      Path.join(release.version_path, "start.script"),
+      :io_lib.format("%% coding: utf-8~n%% script generated at ~p ~p~n~p.~n", [date, time, script])
+    )
+
+    :ok = :systools.script2boot(to_charlist(Path.join(release.version_path, "start")))
+  after
+    File.rm(Path.join(release.version_path, "#{release.name}.script"))
+    File.rm(Path.join(release.version_path, "#{release.name}.boot"))
+  end
+
+  defp rename_rel_script(release) do
+    for ext <- [:boot, :script] do
+      File.rename(
+        Path.join(release.version_path, "#{release.name}.#{ext}"),
+        Path.join(release.version_path, "start.#{ext}")
+      )
     end
   end
 
@@ -281,25 +363,23 @@ defmodule Mix.Tasks.Release do
     app = elem(app_spec, 0)
     vsn = elem(app_spec, 1)
     source_app = Application.app_dir(app)
-    source_ebin = Path.join(source_app, "ebin")
-    source_priv = Path.join(source_ebin, "priv")
-
-    app_dir = "#{app}-#{vsn}"
-    target_app = Path.join([release.path, "lib", app_dir])
-    target_ebin = Path.join(target_app, "ebin")
-    target_priv = Path.join(target_app, "priv")
+    target_app = Path.join([release.root, "lib", "#{app}-#{vsn}"])
 
     File.rm_rf!(target_app)
-    File.mkdir_p!(target_ebin)
-    File.cp_r!(source_ebin, target_ebin)
-    File.exists?(source_priv) && File.cp_r!(source_priv, target_priv)
+    File.mkdir_p!(target_app)
+
+    for dir <- @copy_app_dirs do
+      source_dir = Path.join(source_app, dir)
+      target_dir = Path.join(target_app, dir)
+      File.exists?(source_dir) && File.cp_r!(source_dir, target_dir)
+    end
 
     target_app
   end
 
-  defp copy_executables(release, release_version_path) do
+  defp copy_executables(release) do
     elixir_bin_path = Application.app_dir(:elixir, "../../bin")
-    bin_path = Path.join(release.path, "bin")
+    bin_path = Path.join(release.root, "bin")
     File.mkdir_p!(bin_path)
 
     for os <- Keyword.get(release.options, :include_executables_for, [:unix, :windows]) do
@@ -322,7 +402,7 @@ defmodule Mix.Tasks.Release do
       end
 
       for {filename, contents} <- elixir_cli_for(os, elixir_bin_path, release) do
-        path = Path.join(release_version_path, filename)
+        path = Path.join(release.version_path, filename)
         File.write!(path, contents)
         executable!(path)
       end
@@ -371,14 +451,14 @@ defmodule Mix.Tasks.Release do
 
   defp copy_erts(release) do
     if release.erts_path do
-      File.cp_r!(release.erts_path, Path.join(release.path, "erts-#{release.erts_version}"))
+      File.cp_r!(release.erts_path, Path.join(release.root, "erts-#{release.erts_version}"))
     end
 
     :ok
   end
 
   defp write_data(release) do
-    cookie_path = Path.join(release.path, "releases/COOKIE")
+    cookie_path = Path.join(release.root, "releases/COOKIE")
 
     # TODO: If there is a cookie option and the cookie option
     # is not the same as the file, ask to override.
@@ -386,7 +466,7 @@ defmodule Mix.Tasks.Release do
       File.write!(cookie_path, random_cookie())
     end
 
-    start_erl_path = Path.join(release.path, "releases/start_erl.data")
+    start_erl_path = Path.join(release.root, "releases/start_erl.data")
     File.write!(start_erl_path, "#{release.erts_version} #{release.version}")
     :ok
   end
@@ -394,7 +474,7 @@ defmodule Mix.Tasks.Release do
   defp random_cookie, do: Base.url_encode64(:crypto.strong_rand_bytes(40))
 
   defp announce(release) do
-    path = Path.relative_to_cwd(release.path)
+    path = Path.relative_to_cwd(release.root)
     cmd = "#{path}/bin/#{release.name}"
     Mix.shell().info([:green, "Release created at #{path}!"])
 
