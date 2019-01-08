@@ -38,13 +38,15 @@ defmodule Mix.Tasks.Release do
   # TODO: Overlays
   # TODO: Protocol consolidation
   # TODO: Relups and appups
-  # TODO: Configuration
+  # TODO: sys.config
+  # TODO: Runtime configuration (with Config and ConfigReader)
+  # TODO: Support :steps
 
   use Mix.Task
   import Mix.Generator
 
   @default_apps %{iex: :permanent, elixir: :permanent, sasl: :permanent}
-  @remsh_apps [:kernel, :stdlib, :iex, :elixir, :logger, :compiler]
+  @remote_apps [:kernel, :stdlib, :iex, :elixir, :logger, :compiler]
   @valid_modes [:permanent, :temporary, :transient, :load, :none]
 
   @impl true
@@ -181,8 +183,8 @@ defmodule Mix.Tasks.Release do
       # releases/
       #   VERSION/
       #     NAME.rel
-      #     remsh.boot
-      #     remsh.script
+      #     remote.boot
+      #     remote.script
       #     start.boot
       #     start.script
       build_rel(release, release_version_path)
@@ -232,9 +234,9 @@ defmodule Mix.Tasks.Release do
       )
     end
 
-    remsh_apps = for app <- release.applications, elem(app, 0) in @remsh_apps, do: app
-    rel_path = Path.join(release_version_path, "remsh.rel")
-    build_rel_boot_and_script(rel_path, release, remsh_apps, variables)
+    remote_apps = for app <- release.applications, elem(app, 0) in @remote_apps, do: app
+    rel_path = Path.join(release_version_path, "remote.rel")
+    build_rel_boot_and_script(rel_path, release, remote_apps, variables)
     File.rm(rel_path)
   end
 
@@ -296,19 +298,24 @@ defmodule Mix.Tasks.Release do
   end
 
   defp copy_executables(release, release_version_path) do
+    elixir_bin_path = Application.app_dir(:elixir, "../../bin")
     bin_path = Path.join(release.path, "bin")
     File.mkdir_p!(bin_path)
 
     for os <- Keyword.get(release.options, :include_executables_for, [:unix, :windows]) do
-      {cli, contents} = cli_for(os, release)
-      cli_path = Path.join(bin_path, cli)
+      [{start, contents} | clis] = cli_for(os, release)
+      start_path = Path.join(bin_path, start)
 
-      unless File.exists?(cli_path) do
-        File.write!(cli_path, contents)
-        executable!(cli_path)
+      unless File.exists?(start_path) do
+        File.write!(start_path, contents)
+        executable!(start_path)
       end
 
-      elixir_bin_path = Application.app_dir(:elixir, "../../bin")
+      for {filename, contents} <- clis do
+        path = Path.join(bin_path, filename)
+        File.write!(path, contents)
+        executable!(path)
+      end
 
       unless File.exists?(elixir_bin_path) do
         Mix.raise("Could not find bin files from Elixir installation")
@@ -323,8 +330,12 @@ defmodule Mix.Tasks.Release do
   end
 
   # TODO: Implement windows CLI
-  defp cli_for(:unix, release), do: {"#{release.name}", cli_template(name: release.name)}
-  defp cli_for(:windows, release), do: {"#{release.name}", cli_template(name: release.name)}
+  defp cli_for(_os, release) do
+    [
+      {"start", start_template(name: release.name)},
+      {"#{release.name}", cli_template(name: release.name)}
+    ]
+  end
 
   defp elixir_cli_for(:unix, bin_path, release) do
     [
@@ -380,7 +391,7 @@ defmodule Mix.Tasks.Release do
     :ok
   end
 
-  defp random_cookie, do: Base.encode64(:crypto.strong_rand_bytes(40))
+  defp random_cookie, do: Base.url_encode64(:crypto.strong_rand_bytes(40))
 
   defp announce(release) do
     path = Path.relative_to_cwd(release.path)
@@ -390,20 +401,14 @@ defmodule Mix.Tasks.Release do
     Mix.shell().info("""
 
         # To start your system
-        #{cmd} start
+        #{path}/bin/start
 
-        # To start your system using IEx
-        #{cmd} start iex
-
-        # To start it as a daemon
-        #{cmd} daemon [iex]
-
-    Once the release is running:
+    See the start script for more information. Once the release is running:
 
         # To connect to it remotely
         #{cmd} remote
 
-        # To stop it gracefully
+        # To stop it gracefully (you may also use SIGINT/SIGTERM)
         #{cmd} stop
 
         # To execute Elixir code remotely
@@ -431,6 +436,15 @@ defmodule Mix.Tasks.Release do
   ##-env ERL_FULLSWEEP_AFTER 10
   """)
 
+  embed_template(:start, """
+  #!/bin/sh
+  set -e
+  # Feel free to edit this file in anyway you want
+  # To start your system using IEx: . $(dirname "$0")/<%= @name %> start iex
+  # To start it as a daemon using IEx: . $(dirname "$0")/<%= @name %> daemon iex
+  . $(dirname "$0")/<%= @name %> start
+  """)
+
   # TODO: improve help
   embed_template(:cli, """
   #!/bin/sh
@@ -449,18 +463,18 @@ defmodule Mix.Tasks.Release do
   }
 
   rpc () {
-    exec "$RELEASE_DIR/elixir" \
-         --hidden --name "rpc-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \
-         --boot "${RELEASE_DIR}/remsh" \
-         --boot-var RELEASE_LIB "$REL_ROOT/lib" \
+    exec "$RELEASE_DIR/elixir" \\
+         --hidden --name "rpc-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
+         --boot "${RELEASE_DIR}/remote" \\
+         --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
          --rpc-eval "$REL_NAME@127.0.0.1" "$1"
   }
 
   start () {
-    exec "$RELEASE_DIR/$1" --no-halt \
-         --werl --name "$REL_NAME@127.0.0.1" --cookie "$COOKIE" \
-         --boot "${RELEASE_DIR}/start" \
-         --boot-var RELEASE_LIB "$REL_ROOT/lib" \
+    exec "$RELEASE_DIR/$1" --no-halt \\
+         --werl --name "$REL_NAME@127.0.0.1" --cookie "$COOKIE" \\
+         --boot "${RELEASE_DIR}/start" \\
+         --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
          --vm-args "${RELEASE_DIR}/vm.args" "${@:2}"
   }
 
@@ -475,10 +489,10 @@ defmodule Mix.Tasks.Release do
       ;;
 
     remote)
-      exec "$RELEASE_DIR/iex" \
-           --werl --hidden --name "remsh-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \
-           --boot "${RELEASE_DIR}/remsh" \
-           --boot-var RELEASE_LIB "$REL_ROOT/lib" \
+      exec "$RELEASE_DIR/iex" \\
+           --werl --hidden --name "remote-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
+           --boot "${RELEASE_DIR}/remote" \\
+           --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
            --remsh "$REL_NAME@127.0.0.1"
       ;;
 
