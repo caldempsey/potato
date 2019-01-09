@@ -219,8 +219,8 @@ defmodule Mix.Tasks.Release do
     build_lib(release)
 
     # bin/
-    #   REL_NAME
-    #   REL_NAME.data
+    #   RELEASE_NAME
+    #   RELEASE_NAME.data
     # releases/
     #   VERSION/
     #     elixir
@@ -559,32 +559,32 @@ defmodule Mix.Tasks.Release do
 
   SELF=$(readlink "$0" || true)
   if [ -z "$SELF" ]; then SELF="$0"; fi
-  REL_ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
-  REL_NAME="<%= @name %>"
-  REL_VSN="$(cut -d' ' -f2 "$REL_ROOT/releases/start_erl.data")"
-  export RELEASE_DIR="${RELEASE_DIR:-"$REL_ROOT/releases/$REL_VSN"}"
-  export COOKIE=${COOKIE:-$(cat "$REL_ROOT/releases/COOKIE")}
+  export RELEASE_ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
+  export RELEASE_NAME="${RELEASE_NAME:-"<%= @name %>"}"
+  export RELEASE_VSN="${RELEASE_VSN:-"$(cut -d' ' -f2 "$RELEASE_ROOT/releases/start_erl.data")"}"
+  export COOKIE=${COOKIE:-$(cat "$RELEASE_ROOT/releases/COOKIE")}
+  REL_VSN_DIR="$RELEASE_ROOT/releases/$RELEASE_VSN"
 
   gen_id () {
     od -t x -N 4 /dev/urandom | head -n1 | awk '{print $2}'
   }
 
   rpc () {
-    exec "$RELEASE_DIR/elixir" \\
+    exec "$REL_VSN_DIR/elixir" \\
          --hidden --name "rpc-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
-         --erl-config "${RELEASE_DIR}/sys" \\
-         --boot "${RELEASE_DIR}/remote" \\
-         --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
-         --rpc-eval "$REL_NAME@127.0.0.1" "$1"
+         --erl-config "${REL_VSN_DIR}/sys" \\
+         --boot "${REL_VSN_DIR}/remote" \\
+         --boot-var RELEASE_LIB "$RELEASE_ROOT/lib" \\
+         --rpc-eval "$RELEASE_NAME@127.0.0.1" "$1"
   }
 
   start () {
-    exec "$RELEASE_DIR/$1" --no-halt \\
-         --werl --name "$REL_NAME@127.0.0.1" --cookie "$COOKIE" \\
-         --erl-config "${RELEASE_DIR}/sys" \\
-         --boot "${RELEASE_DIR}/start" \\
-         --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
-         --vm-args "${RELEASE_DIR}/vm.args" "${@:2}"
+    exec "$REL_VSN_DIR/$1" --no-halt \\
+         --werl --name "$RELEASE_NAME@127.0.0.1" --cookie "$COOKIE" \\
+         --erl-config "${REL_VSN_DIR}/sys" \\
+         --boot "${REL_VSN_DIR}/start" \\
+         --boot-var RELEASE_LIB "$RELEASE_ROOT/lib" \\
+         --vm-args "${REL_VSN_DIR}/vm.args" "${@:2}"
   }
 
   case $1 in
@@ -593,17 +593,17 @@ defmodule Mix.Tasks.Release do
       ;;
 
     daemon)
-      export RELEASE_TMP="${RELEASE_TMP:-"$REL_ROOT/tmp"}"
+      export RELEASE_TMP="${RELEASE_TMP:-"$RELEASE_ROOT/tmp"}"
       start ${2:-elixir} --pipe-to "${RELEASE_TMP}/pipe" "${RELEASE_TMP}/log"
       ;;
 
     remote)
-      exec "$RELEASE_DIR/iex" \\
+      exec "$REL_VSN_DIR/iex" \\
            --werl --hidden --name "remote-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
-           --erl-config "${RELEASE_DIR}/sys" \\
-           --boot "${RELEASE_DIR}/remote" \\
-           --boot-var RELEASE_LIB "$REL_ROOT/lib" \\
-           --remsh "$REL_NAME@127.0.0.1"
+           --erl-config "${REL_VSN_DIR}/sys" \\
+           --boot "${REL_VSN_DIR}/remote" \\
+           --boot-var RELEASE_LIB "$RELEASE_ROOT/lib" \\
+           --remsh "$RELEASE_NAME@127.0.0.1"
       ;;
 
     rpc)
