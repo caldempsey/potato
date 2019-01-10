@@ -175,7 +175,8 @@ defmodule Mix.Tasks.Release do
   use Mix.Task
   import Mix.Generator
 
-  @remote_apps [:kernel, :stdlib, :iex, :elixir, :logger, :compiler]
+  # TODO: Remove gl from logger handle_event
+  @remote_apps [:kernel, :stdlib, :iex, :elixir, :compiler]
   @copy_app_dirs ["ebin", "include", "priv"]
 
   @impl true
@@ -385,7 +386,7 @@ defmodule Mix.Tasks.Release do
 
   defp copy_app(app_spec, release) do
     # TODO: Do not copy ERTS apps if include ERTS is false
-    # TODO: Strip beams
+    # TODO: Strip beams (send PR to OTP)
 
     app = elem(app_spec, 0)
     vsn = elem(app_spec, 1)
@@ -477,6 +478,7 @@ defmodule Mix.Tasks.Release do
   end
 
   defp copy_erts(release) do
+    # TODO: Copy ERTS properly
     if release.erts_path do
       File.cp_r!(release.erts_path, Path.join(release.root, "erts-#{release.erts_version}"))
     end
