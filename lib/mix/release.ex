@@ -2,11 +2,11 @@ defmodule Mix.Release do
   defstruct [
     :name,
     :version,
-    :root,
+    :path,
     :version_path,
-    :erts_path,
-    :erts_version,
     :applications,
+    :erts_source,
+    :erts_version,
     :config_source,
     :consolidation_source,
     :options
@@ -17,11 +17,11 @@ defmodule Mix.Release do
   @type t :: %{
           name: atom(),
           version: String.t(),
-          root: String.t(),
+          path: String.t(),
           version_path: String.t(),
-          erts_path: charlist() | nil,
           erts_version: charlist(),
           applications: [application],
+          erts_source: charlist() | nil,
           consolidation_source: String.t() | nil,
           config_source: String.t() | nil,
           options: keyword()
@@ -36,7 +36,7 @@ defmodule Mix.Release do
     apps = Map.merge(@default_apps, apps)
 
     {include_erts, opts} = Keyword.pop(opts, :include_erts, true)
-    {erts_path, erts_version} = erts_data(include_erts)
+    {erts_source, erts_version} = erts_data(include_erts)
 
     rel_apps =
       apps
@@ -45,7 +45,7 @@ defmodule Mix.Release do
       |> Map.values()
       |> Enum.sort()
 
-    root = Path.join([Mix.Project.build_path(config), "rel", Atom.to_string(name)])
+    path = opts[:path] || Path.join([Mix.Project.build_path(config), "rel", Atom.to_string(name)])
     version = opts[:version] || Keyword.fetch!(config, :version)
 
     consolidation_source =
@@ -61,9 +61,9 @@ defmodule Mix.Release do
     %Mix.Release{
       name: name,
       version: version,
-      root: root,
-      version_path: Path.join([root, "releases", version]),
-      erts_path: erts_path,
+      path: path,
+      version_path: Path.join([path, "releases", version]),
+      erts_source: erts_source,
       erts_version: erts_version,
       applications: rel_apps,
       consolidation_source: consolidation_source,
@@ -81,12 +81,12 @@ defmodule Mix.Release do
     {:filename.join(:code.root_dir(), 'erts-#{version}'), version}
   end
 
-  defp erts_data(erts_path) when is_binary(erts_path) do
-    if File.exists?(erts_path) do
-      [_, erts_version] = erts_path |> Path.basename() |> String.split("-")
-      {to_charlist(erts_path), to_charlist(erts_version)}
+  defp erts_data(erts_source) when is_binary(erts_source) do
+    if File.exists?(erts_source) do
+      [_, erts_version] = erts_source |> Path.basename() |> String.split("-")
+      {to_charlist(erts_source), to_charlist(erts_version)}
     else
-      Mix.raise("Could not find ERTS system at #{inspect(erts_path)}")
+      Mix.raise("Could not find ERTS system at #{inspect(erts_source)}")
     end
   end
 
@@ -184,12 +184,12 @@ defmodule Mix.Tasks.Release do
   # All other pending TODOs
   # TODO: Support --force
   # TODO: Docs, docs, docs, docs, docs, docs, docs
+  # TODO: Support :steps
 
   # v0.2
   # TODO: Copy or evaluate rel/vm.args{.eex} if one is available
   # TODO: Overlays
   # TODO: Runtime configuration (with Config and ConfigReader)
-  # TODO: Support :steps
 
   # v0.3
   # TODO: Relups and appups
@@ -216,6 +216,7 @@ defmodule Mix.Tasks.Release do
 
     if not File.exists?(release.version_path) or
          Mix.shell().yes?("Release #{release.name}-#{release.version} already exists. Override?") do
+      # TODO: Those are two distinct steps
       assemble(release)
       announce(release)
     end
@@ -395,7 +396,7 @@ defmodule Mix.Tasks.Release do
   end
 
   defp build_meta(release) do
-    cookie_path = Path.join(release.root, "releases/COOKIE")
+    cookie_path = Path.join(release.path, "releases/COOKIE")
 
     # TODO: If there is a cookie option and the cookie option
     # is not the same as the file, ask to override.
@@ -403,7 +404,7 @@ defmodule Mix.Tasks.Release do
       File.write!(cookie_path, random_cookie())
     end
 
-    start_erl_path = Path.join(release.root, "releases/start_erl.data")
+    start_erl_path = Path.join(release.path, "releases/start_erl.data")
     File.write!(start_erl_path, "#{release.erts_version} #{release.version}")
     :ok
   end
@@ -411,7 +412,7 @@ defmodule Mix.Tasks.Release do
   defp random_cookie, do: Base.url_encode64(:crypto.strong_rand_bytes(40))
 
   defp announce(release) do
-    path = Path.relative_to_cwd(release.root)
+    path = Path.relative_to_cwd(release.path)
     cmd = "#{path}/bin/#{release.name}"
 
     Mix.shell().info([:green, "Release created at #{path}!"])
@@ -438,13 +439,13 @@ defmodule Mix.Tasks.Release do
 
   defp copy(app_spec, release) when is_tuple(app_spec) do
     # TODO: Do not copy ERTS apps if include ERTS is false
-    # TODO: Strip beams (send PR to OTP)
+    # TODO: Strip beams
     # TODO: Use Mix.Release.copy_app(release, app, vsn)
 
     app = elem(app_spec, 0)
     vsn = elem(app_spec, 1)
     source_app = Application.app_dir(app)
-    target_app = Path.join([release.root, "lib", "#{app}-#{vsn}"])
+    target_app = Path.join([release.path, "lib", "#{app}-#{vsn}"])
 
     File.rm_rf!(target_app)
     File.mkdir_p!(target_app)
@@ -461,8 +462,8 @@ defmodule Mix.Tasks.Release do
   defp copy(:erts, release) do
     # TODO: Copy ERTS properly
     # TODO: Move this to Mix.Release.copy_erts(release)
-    if release.erts_path do
-      File.cp_r!(release.erts_path, Path.join(release.root, "erts-#{release.erts_version}"))
+    if release.erts_source do
+      File.cp_r!(release.erts_source, Path.join(release.path, "erts-#{release.erts_version}"))
     end
 
     :ok
@@ -477,9 +478,10 @@ defmodule Mix.Tasks.Release do
 
   defp copy(:executables, release) do
     elixir_bin_path = Application.app_dir(:elixir, "../../bin")
-    bin_path = Path.join(release.root, "bin")
+    bin_path = Path.join(release.path, "bin")
     File.mkdir_p!(bin_path)
 
+    # TODO: Move to Mix.Release.elixir_cli(release, nesting)
     for os <- Keyword.get(release.options, :include_executables_for, [:unix, :windows]) do
       [{start, contents} | clis] = cli_for(os, release)
       start_path = Path.join(bin_path, start)
@@ -540,7 +542,7 @@ defmodule Mix.Tasks.Release do
   defp executable!(path), do: File.chmod!(path, 0o744)
 
   defp replace_erts_bin(contents, release, new_path) do
-    if release.erts_path do
+    if release.erts_source do
       String.replace(contents, ~s[ERTS_BIN=""], ~s[ERTS_BIN=#{new_path}])
     else
       contents
