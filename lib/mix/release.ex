@@ -186,19 +186,11 @@ defmodule Mix.Tasks.Release do
   # TODO: Docs, docs, docs, docs, docs, docs, docs
   # TODO: Support :steps
 
-  # v0.2
-  # TODO: Copy or evaluate rel/vm.args{.eex} if one is available
-  # TODO: Overlays
-  # TODO: Runtime configuration (with Config and ConfigReader)
-
-  # v0.3
-  # TODO: Relups and appups
-
   use Mix.Task
   import Mix.Generator
 
   # TODO: Remove gl from logger handle_event
-  @remote_apps [:kernel, :stdlib, :iex, :elixir, :compiler]
+  @remote_apps [:kernel, :stdlib, :iex, :elixir, :compiler, :logger]
   @copy_app_dirs ["ebin", "include", "priv"]
 
   @impl true
@@ -598,7 +590,6 @@ defmodule Mix.Tasks.Release do
   rpc () {
     exec "$REL_VSN_DIR/elixir" \\
          --hidden --name "rpc-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
-         --erl-config "${REL_VSN_DIR}/sys" \\
          --boot "${REL_VSN_DIR}/remote" \\
          --boot-var RELEASE_LIB "$RELEASE_ROOT/lib" \\
          --rpc-eval "$RELEASE_NAME@127.0.0.1" "$1"
@@ -626,7 +617,6 @@ defmodule Mix.Tasks.Release do
     remote)
       exec "$REL_VSN_DIR/iex" \\
            --werl --hidden --name "remote-$(gen_id)@127.0.0.1" --cookie "$COOKIE" \\
-           --erl-config "${REL_VSN_DIR}/sys" \\
            --boot "${REL_VSN_DIR}/remote" \\
            --boot-var RELEASE_LIB "$RELEASE_ROOT/lib" \\
            --remsh "$RELEASE_NAME@127.0.0.1"
